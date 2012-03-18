@@ -1,0 +1,9 @@
+Dependencies for phpBB 3.1
+==========================
+
+This repository contains all dependencies used by phpBB 3.1.
+
+It is built by first installing the dependencies via Composer
+and then copying the PHP files into this repository.
+
+See https://github.com/p/phpbb3-include-path-autoload for usage instructions.
