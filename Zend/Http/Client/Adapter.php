@@ -1,0 +1,2 @@
+<?php
+ namespace Zend\Http\Client; interface Adapter { public function setConfig($config = array()); public function connect($host, $port = 80, $secure = false); public function write($method, $url, $http_ver = '1.1', $headers = array(), $body = ''); public function read(); public function close(); } 
