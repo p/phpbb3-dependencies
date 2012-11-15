@@ -1,2 +1,174 @@
 <?php
- namespace Goutte; use Symfony\Component\BrowserKit\Client as BaseClient; use Symfony\Component\BrowserKit\History; use Symfony\Component\BrowserKit\CookieJar; use Symfony\Component\BrowserKit\Request; use Symfony\Component\BrowserKit\Response; use Zend\Http\Client as ZendClient; use Zend\Http\Response as ZendResponse; class Client extends BaseClient { const VERSION = '0.1'; protected $zendConfig; protected $headers = array(); protected $auth = null; public function __construct(array $zendConfig = array(), array $server = array(), History $history = null, CookieJar $cookieJar = null) { $this->zendConfig = $zendConfig; parent::__construct($server, $history, $cookieJar); } public function setHeader($name, $value) { $this->headers[$name] = $value; } public function setAuth($user, $password = '', $type = ZendClient::AUTH_BASIC) { $this->auth = array( 'user' => $user, 'password' => $password, 'type' => $type ); } protected function doRequest($request) { $client = $this->createClient($request); $response = $client->request(); return $this->createResponse($response); } protected function createClient(Request $request) { $client = $this->createZendClient(); $client->setUri($request->getUri()); $client->setConfig(array_merge(array( 'maxredirects' => 0, 'timeout' => 30, 'useragent' => $this->server['HTTP_USER_AGENT'], 'adapter' => 'Zend\\Http\\Client\\Adapter\\Socket', ), $this->zendConfig)); $client->setMethod(strtoupper($request->getMethod())); if ('POST' == $request->getMethod()) { $client->setParameterPost($request->getParameters()); } foreach ($this->headers as $name => $value) { $client->setHeaders($name, $value); } if ($this->auth !== null) { $client->setAuth( $this->auth['user'], $this->auth['password'], $this->auth['type'] ); } foreach ($this->getCookieJar()->allValues($request->getUri()) as $name => $value) { $client->setCookie($name, $value); } foreach ($request->getFiles() as $name => $info) { if (isset($info['tmp_name']) && '' !== $info['tmp_name']) { $filename = $info['name']; if (false === ($data = @file_get_contents($info['tmp_name']))) { throw new \RuntimeException("Unable to read file '{$filename}' for upload"); } $client->setFileUpload($filename, $name, $data); } } return $client; } protected function createResponse(ZendResponse $response) { return new Response($response->getBody(), $response->getStatus(), $response->getHeaders()); } protected function createZendClient() { return new ZendClient(); } } 
+
+/*
+ * This file is part of the Goutte package.
+ *
+ * (c) Fabien Potencier <fabien@symfony.com>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+namespace Goutte;
+
+use Symfony\Component\BrowserKit\Client as BaseClient;
+use Symfony\Component\BrowserKit\Response;
+
+use Guzzle\Http\Exception\CurlException;
+use Guzzle\Http\Exception\BadResponseException;
+use Guzzle\Http\Message\Response as GuzzleResponse;
+use Guzzle\Http\ClientInterface as GuzzleClientInterface;
+use Guzzle\Http\Client as GuzzleClient;
+use Guzzle\Http\Message\EntityEnclosingRequestInterface;
+
+/**
+ * Client.
+ *
+ * @package Goutte
+ * @author  Fabien Potencier <fabien.potencier@symfony-project.com>
+ * @author  Michael Dowling <michael@guzzlephp.org>
+ */
+class Client extends BaseClient
+{
+    const VERSION = '0.2';
+
+    protected $headers = array();
+    protected $auth = null;
+    protected $client;
+
+    public function setClient(GuzzleClientInterface $client)
+    {
+        $this->client = $client;
+
+        return $this;
+    }
+
+    public function getClient()
+    {
+        if (!$this->client) {
+            $this->client = new GuzzleClient();
+        }
+
+        return $this->client;
+    }
+
+    public function setHeader($name, $value)
+    {
+        $this->headers[$name] = $value;
+
+        return $this;
+    }
+
+    public function setAuth($user, $password = '', $type = CURLAUTH_BASIC)
+    {
+        $this->auth = array(
+            'user' => $user,
+            'password' => $password,
+            'type'     => $type
+        );
+
+        return $this;
+    }
+
+    protected function doRequest($request)
+    {
+        $headers = array();
+        foreach ($request->getServer() as $key => $val) {
+            $key = ucfirst(strtolower(str_replace(array('_', 'HTTP-'), array('-', ''), $key)));
+            if (!isset($headers[$key])) {
+                $headers[$key] = $val;
+            }
+        }
+
+        $body = null;
+        if (!in_array($request->getMethod(), array('GET','HEAD'))) {
+            if (null !== $request->getContent()) {
+                $body = $request->getContent();
+            } else {
+                $body = $request->getParameters();
+            }
+        }
+
+        $guzzleRequest = $this->getClient()->createRequest(
+            $request->getMethod(),
+            $request->getUri(),
+            $headers,
+            $body
+        );
+
+        foreach ($this->headers as $name => $value) {
+            $guzzleRequest->setHeader($name, $value);
+        }
+
+        if ($this->auth !== null) {
+            $guzzleRequest->setAuth(
+                $this->auth['user'],
+                $this->auth['password'],
+                $this->auth['type']
+            );
+        }
+
+        foreach ($this->getCookieJar()->allRawValues($request->getUri()) as $name => $value) {
+            $guzzleRequest->addCookie($name, $value);
+        }
+
+        if ('POST' == $request->getMethod()) {
+            $this->addPostFiles($guzzleRequest, $request->getFiles());
+        }
+
+        $curlOptions = $guzzleRequest->getCurlOptions()
+            ->set(CURLOPT_FOLLOWLOCATION, false)
+            ->set(CURLOPT_MAXREDIRS, 0);
+
+        if (!$curlOptions->get(CURLOPT_TIMEOUT)) {
+            $curlOptions->set(CURLOPT_TIMEOUT, 30);
+        }
+
+        // Let BrowserKit handle redirects
+        try {
+            $response = $guzzleRequest->send();
+        } catch (CurlException $e) {
+            if (!strpos($e->getMessage(), 'redirects')) {
+                throw $e;
+            }
+
+            $response = $e->getResponse();
+        } catch (BadResponseException $e) {
+            $response = $e->getResponse();
+        }
+
+        return $this->createResponse($response);
+    }
+
+    protected function addPostFiles($request, array $files, $arrayName = '')
+    {
+        if (!$request instanceof EntityEnclosingRequestInterface) {
+            return;
+        }
+
+        foreach ($files as $name => $info) {
+            if (!empty($arrayName)) {
+                $name = $arrayName . '[' . $name . ']';
+            }
+
+            if (is_array($info)) {
+                if (isset($info['tmp_name'])) {
+                    if ('' !== $info['tmp_name']) {
+                        $request->addPostFile($name, $info['tmp_name']);
+                    } else {
+                        continue;
+                    }
+                } else {
+                    $this->addPostFiles($request, $info, $name);
+                }
+            } else {
+                $request->addPostFile($name, $info);
+            }
+        }
+    }
+
+    protected function createResponse(GuzzleResponse $response)
+    {
+        return new Response($response->getBody(true), $response->getStatusCode(), $response->getHeaders()->getAll());
+    }
+}
